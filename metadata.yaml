@@ -1,0 +1,9 @@
+name: astrbot_plugin_wecom_external_bridge
+display_name: 企业微信外部客户群 Frida 接入
+version: 1.1.0
+author: jiangbkvir
+repo: https://github.com/jiangbkvir/astrbot_plugin_wecom_external_bridge
+astrbot_version: ">=4.29,<5"
+desc: 在 AstrBot 插件内直接通过远程 Frida 处理企业微信外部客户群文本消息，无需独立 HTTP 桥接服务。
+short_desc: 企业微信外部客户群原生 Frida 接入
+
