@@ -1,0 +1,127 @@
+name: Package AstrBot plugin
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate plugin
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check PyYAML==6.0.2
+          python -m py_compile main.py
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          root = Path(".")
+          metadata = yaml.safe_load((root / "metadata.yaml").read_text(encoding="utf-8"))
+          required = ("name", "display_name", "version", "author", "desc")
+          missing = [key for key in required if not metadata.get(key)]
+          if missing:
+              raise SystemExit(f"metadata.yaml missing fields: {missing}")
+
+          expected_name = "astrbot_plugin_wecom_external_bridge"
+          if metadata["name"] != expected_name:
+              raise SystemExit(f"unexpected plugin name: {metadata['name']}")
+
+          required_files = (
+              "main.py",
+              "metadata.yaml",
+              "requirements.txt",
+              "agent/monitor.js",
+              "README.md",
+              "LICENSE",
+          )
+          absent = [name for name in required_files if not (root / name).is_file()]
+          if absent:
+              raise SystemExit(f"missing plugin files: {absent}")
+
+          print(f"validated {metadata['name']} v{metadata['version']}")
+          PY
+
+      - name: Build plugin archive
+        run: |
+          set -euo pipefail
+          PLUGIN_NAME=$(python -c 'import yaml; print(yaml.safe_load(open("metadata.yaml", encoding="utf-8"))["name"])')
+          VERSION=$(python -c 'import yaml; print(yaml.safe_load(open("metadata.yaml", encoding="utf-8"))["version"])')
+          ARCHIVE_NAME="${PLUGIN_NAME}-${VERSION}.zip"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* && "${GITHUB_REF_NAME#v}" != "${VERSION}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match metadata version ${VERSION}" >&2
+            exit 1
+          fi
+
+          STAGE="dist/${PLUGIN_NAME}"
+          mkdir -p "${STAGE}/agent"
+          cp README.md LICENSE main.py metadata.yaml requirements.txt "${STAGE}/"
+          cp agent/monitor.js "${STAGE}/agent/"
+          if [[ -f CHANGELOG.md ]]; then
+            cp CHANGELOG.md "${STAGE}/"
+          fi
+
+          (
+            cd dist
+            zip -qr "${ARCHIVE_NAME}" "${PLUGIN_NAME}"
+          )
+          sha256sum "dist/${ARCHIVE_NAME}" > "dist/${ARCHIVE_NAME}.sha256"
+
+          ARCHIVE_SIZE=$(stat -c%s "dist/${ARCHIVE_NAME}")
+          if (( ARCHIVE_SIZE > 16 * 1024 * 1024 )); then
+            echo "Plugin archive exceeds the AstrBot 16 MiB limit" >&2
+            exit 1
+          fi
+
+          echo "PLUGIN_NAME=${PLUGIN_NAME}" >> "${GITHUB_ENV}"
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "${GITHUB_ENV}"
+          echo "Built ${ARCHIVE_NAME} (${ARCHIVE_SIZE} bytes)"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PLUGIN_NAME }}-${{ env.VERSION }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              --title "${TAG}" \
+              --notes "Automated package for ${PLUGIN_NAME} ${VERSION}."
+          fi
+          gh release upload "${TAG}" \
+            "dist/${ARCHIVE_NAME}" \
+            "dist/${ARCHIVE_NAME}.sha256" \
+            --clobber
